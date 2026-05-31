@@ -1,0 +1,553 @@
+# JWT Profile for Agent Identity and Entitlement in OAuth 2.0 Token Exchange Actor Tokens
+
+draft-hyland-oauth-agent-actor-token-04
+
+## Abstract
+
+This specification profiles the `actor_token` parameter of OAuth 2.0 Token Exchange [RFC8693] to carry, in delegated agentic flows, the identity of a software agent acting on behalf of a Principal and an optional entitlement constraint on that agent. It defines two JSON Web Token (JWT) claims for use in the `actor_token`: `aid` (a reference to a named profile in the agent operator’s client metadata) and `ent` (an inline entitlement). The `aid` and `ent` claims are mutually exclusive. It also defines one entity metadata member for the agent operator’s OAuth client, `entitlement_profiles`, by which the agent operator declares the named profiles its agents may reference; a referenced profile MAY carry an entitlement constraint or MAY identify the agent with no entitlement constraint at all.
+
+The profile applies only to Token Exchange requests in which both `subject_token` and `actor_token` are present (delegation semantics per [RFC8693] Section 1.1). Operational attribution of the agent (the deployment that launched it and the human operator of record) was specified in an earlier revision of this document; it has been removed and is delegated to a companion profile of [RFC7523] client assertions, so that workload-domain and operator information does not propagate along the token-exchange chain. See Section 1.3.
+
+## Status of This Memo
+
+This Internet-Draft is submitted in full conformance with the provisions of BCP 78 and BCP 79.
+
+Internet-Drafts are working documents of the Internet Engineering Task Force (IETF). Note that other groups may also distribute working documents as Internet-Drafts.
+
+## Copyright Notice
+
+Copyright (c) 2026 IETF Trust and the persons identified as the document authors. All rights reserved.
+
+-----
+
+## 1. Introduction
+
+OAuth 2.0 Token Exchange [RFC8693] supports delegation through the use of an `actor_token` alongside the `subject_token`. Per [RFC8693] Section 1.1, this distinguishes delegation (the acting party has its own identity, recorded in the issued token’s `act` claim) from impersonation (the acting party is indistinguishable from the subject). Software agents acting on behalf of human Principals are a canonical delegation case: the Principal is the resource owner whose data or accounts the agent operates against; the agent is a software entity with its own identity, run by an agent operator on whose attestation the Authorization Server (AS) relies.
+
+[RFC8693] is silent on the internal structure of the `actor_token`, treating it as a security token of one of the registered types whose `iss`/`sub` flow into the issued token’s `act` claim. This specification profiles the `actor_token` JWT for the agentic delegation case by defining an agent entitlement carried either by reference (`aid`) or inline (`ent`), and the metadata mechanism by which the entitlement is bounded.
+
+### 1.1. Scope
+
+This profile addresses the `actor_token` of an OAuth 2.0 Token Exchange request. It does not address, and makes no claims about:
+
+- the authentication of the OAuth client to the AS at the token endpoint (that is the AS’s client authentication policy, whatever it may be — [RFC7523], [RFC8705], or another mechanism);
+- agent identity in non-delegated flows such as `client_credentials` or `authorization_code`, which do not carry an `actor_token` and are simply not in scope for this document;
+- workload identity (the running software instance and its host), which is handled by other mechanisms such as SPIFFE [SPIFFE] and is not carried in the actor_token under this profile.
+
+The exclusion of the items above is a scoping decision about what this document specifies; it is not a claim that they belong to a different architectural layer. They are adjacent concerns that a complete deployment addresses by other means.
+
+### 1.2. Guidance on Actor Claim Content
+
+The content this profile places in, or reflects into, the issued token’s `act` claim is governed by [RFC8693] Section 4.1, which is the normative source for actor-claim semantics. In particular, Section 4.1 establishes that:
+
+- the `act` claim is a JSON object whose members identify the current actor;
+- a chain of delegation is expressed by nesting `act` claims, the outermost being the current actor and nested claims being prior actors;
+- for the purpose of applying access control policy, a consumer considers only the token’s top-level claims and the party identified as the current actor; prior actors in nested `act` claims are informational;
+- members within an `act` claim pertain to the identity of the actor, and non-identity claims such as `exp`, `nbf`, and `aud` are not meaningful there.
+
+This profile’s reflection of `aid` or `ent` into `act` (Section 5.3) is constrained by these rules: reflected entitlement is identity-scoped descriptive information about the actor, not an independent grant, and is read by consumers accordingly. Implementers should also consult the JWT Best Current Practices [RFC8725] for general guidance on claims handling, and [RFC9068] where the issued token is a JWT access token.
+
+### 1.3. Relationship to a Companion Client-Assertion Profile
+
+An earlier revision of this document carried, in the actor_token, an `attribution` claim recording the deployment that launched the agent and the human operator of record for it. That material has been removed from this profile.
+
+The reason is a security and privacy property of the token-exchange chain: the actor_token, and anything reflected from it into the issued token’s `act` claim, propagates out of the agent operator’s domain to the AS and potentially onward to resource servers. Deployment identifiers reveal workload-domain detail, and an operator-of-record is a named human whose identifier is personal data. Neither should ride the token-exchange chain merely to record provenance. Attribution of this kind is better carried in the client assertion presented by the workload to the AS (a single hop that terminates at the AS and does not propagate), and is therefore delegated to a companion profile of [RFC7523] client assertions, to be specified separately. This document confines itself to agent identity and entitlement.
+
+### 1.4. The Agent and the Agent Operator
+
+An **agent** is a software entity that performs operations on behalf of a Principal. An **agent operator** is the organisation that runs the agent — registered with the AS as an OAuth client and trusted by the AS to issue actor_tokens for its agents. The actor_token’s `iss` is the agent operator’s identifier; its `sub` is the specific agent. The relationship is many-to-one: an agent operator runs many agents.
+
+The agent is not modelled as a federation entity distinct from the operator’s OAuth client. An agent has no Entity Configuration of its own and no separate trust chain. Its identity and any entitlement constraint are bounded by metadata published on the agent operator’s OAuth client (Section 6). This is a deliberate scoping decision: enrolling agents as independent entities was considered and rejected in earlier revisions as overweight for what an agent is — a constrained instantiation of an existing client, not a peer identity.
+
+### 1.5. Notational Conventions
+
+The key words “MUST”, “MUST NOT”, “REQUIRED”, “SHALL”, “SHALL NOT”, “SHOULD”, “SHOULD NOT”, “RECOMMENDED”, “NOT RECOMMENDED”, “MAY”, and “OPTIONAL” in this document are to be interpreted as described in BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all capitals, as shown here.
+
+### 1.6. Terminology
+
+- **Agent**: A software entity that performs operations on behalf of a Principal. Identified by the actor_token’s `iss` (agent operator) and `sub` (the agent within that operator).
+- **Agent Operator**: The organisation that runs one or more agents; registered with the AS as an OAuth client; trusted to issue actor_tokens for its agents.
+- **Entitlement Profile** (or **profile**): A named entry, declared in the agent operator’s OAuth client metadata under the `entitlement_profiles` member (Section 6). A profile MAY carry an entitlement constraint, or MAY be entitlement-free (pure identity). Referenced from an actor_token by name via `aid`.
+- **Agent Entitlement** (or **entitlement**): A description, in JSON, of what the agent is entitled to do in the resource domain. Carried by reference (the constraint declared in the profile named by `aid`) or inline (`ent`). A constraint on the agent over subject resources, NOT OAuth-protocol authority (Section 3.3).
+- **Authorization Server (AS)**: As defined in [RFC6749].
+- **Principal**: The resource owner on whose behalf the agent operates. Conveyed by the `subject_token`; out of scope for this profile.
+
+### 1.7. Relationship to Other Specifications
+
+This specification profiles [RFC8693] Token Exchange and the [RFC7519] JWT shape of the `actor_token`. It applies only when the `actor_token` is a JWT (`actor_token_type` of `urn:ietf:params:oauth:token-type:jwt`, or `urn:ietf:params:oauth:token-type:access_token` where that access token is a JWT per [RFC9068]).
+
+The `ent` claim is informed by the JSON structure of [RFC9396] Section 2.2 — the domain-specific fields a single authorization-detail type would define — but is deliberately NOT an `authorization_details` value: it is not an array, it carries no `type` field, it does not describe authorization data for a grant, and its semantics differ from [RFC9396] as described in Section 3.3. Validation errors for `ent`, however, deliberately reuse the [RFC9396] Section 5 error behaviour (Section 5.4).
+
+This profile does not use [RFC8693] `may_act`. A future revision may add it as the Principal-side authorisation gate; for now the AS authorises the delegation on the basis of the actor_token’s content and local policy.
+
+-----
+
+## 2. Profile Overview
+
+This profile applies to Token Exchange requests of the form:
+
+```
+POST /token HTTP/1.1
+Host: as.example.com
+Content-Type: application/x-www-form-urlencoded
+<client authentication per AS policy>
+
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange
+&subject_token=<JWT representing the Principal>
+&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt
+&actor_token=<JWT representing the agent — this profile applies here>
+&actor_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt
+&audience=<target resource server>
+```
+
+The profile defines, for the `actor_token` JWT:
+
+```
++-------+--------------------------------------------------------+
+| Claim | Purpose                                                |
++-------+--------------------------------------------------------+
+| aid   | Name of a profile in the agent operator's metadata.    |
+|       | The named profile MAY carry an entitlement constraint  |
+|       | or MAY be entitlement-free. Mutually exclusive with    |
+|       | ent.                                                   |
+| ent   | Inline entitlement; a JSON object validated against    |
+|       | the agent operator's declared profiles. Mutually       |
+|       | exclusive with aid.                                    |
++-------+--------------------------------------------------------+
+```
+
+Plus, for the agent operator’s OAuth client metadata, one member:
+
+```
++----------------------+-----------------------------------------+
+| Member               | Purpose                                 |
++----------------------+-----------------------------------------+
+| entitlement_profiles | Object declaring named profiles agents  |
+|                      | of this operator may reference. A       |
+|                      | profile may be entitlement-free.        |
++----------------------+-----------------------------------------+
+```
+
+Both actor_token claims are OPTIONAL. An actor_token carrying neither is a conformant [RFC8693] actor_token outside the scope of this profile.
+
+The AS processes a profile-conformant Token Exchange as follows:
+
+1. Validate the actor_token per [RFC8693] Section 2.1 (signature against the agent operator’s keys, `iss`, `aud`, `exp`, etc.).
+1. If both `aid` and `ent` are present, reject (Section 5.4).
+1. If `aid` is present, resolve it against the agent operator’s `entitlement_profiles` metadata; the named profile may or may not carry an entitlement constraint (Section 4.3.2).
+1. If `ent` is present, check it is well-formed and validate it against the agent operator’s declared profiles (Section 4.3.3).
+1. Apply local policy. Issue a token. Optionally reflect agent identity and entitlement into the issued token’s `act` claim (Section 5.3).
+
+-----
+
+## 3. Actor Token Claims
+
+The AS MUST validate the actor_token per [RFC8693] Section 2.1. This profile adds the following claims; their absence is not a profile violation.
+
+### 3.1. Standard JWT and [RFC8693] Claims
+
+- `iss`: the agent operator’s identifier. The agent operator MUST be a party the AS trusts to issue actor_tokens (Section 4.2). Flows into the issued token’s `act` per [RFC8693] Section 4.1.
+- `sub`: the agent identifier, scoped to the issuer. The same string from two issuers identifies two different agents. Flows into the issued token’s `act.sub`.
+- `aud`: the AS that will consume the actor_token. The AS MUST reject any actor_token that does not contain its own identity as an `aud` value.
+- `iat`, `exp`, `jti`: as standard; replay defences per [RFC8693] / [RFC7519] / [RFC8725].
+
+### 3.2. The `aid` (Agent Identifier) Claim
+
+The `aid` claim references, by name, a profile declared in the agent operator’s OAuth client metadata under the `entitlement_profiles` member (Section 6).
+
+The `aid` claim is a JSON **string**. It MUST NOT be a JSON array; this profile is restricted to a single named profile per actor_token. Where an agent’s operation requires authority spanning more than one conceptual entitlement, that is expressed in a richer single profile declaration, or inline via `ent`, rather than by enumerating names.
+
+Example:
+
+```
+"aid": "payment_initiation"
+```
+
+The profile named by `aid` MAY declare an entitlement constraint, or MAY be entitlement-free. An entitlement-free profile recognises and names the agent without bounding it with an entitlement: the agent is identified and authorised to act in the delegation, but this profile imposes no resource-domain entitlement ceiling on it (other constraints — `scope`, `resource`, AS policy — still apply). This supports the case of an agent that is recognised but not entitlement-constrained. See Section 6.2.
+
+A profile name is scoped to the agent operator that declared it. It is not a globally registered identifier and is not a URI. Its meaning is established solely by the `entitlement_profiles` metadata of the agent operator identified by the actor_token’s `iss`. The same name from two operators is two different profiles.
+
+The `aid` claim is OPTIONAL. It is mutually exclusive with `ent`: an actor_token MUST NOT carry both (Section 4.3.1, Section 5.4).
+
+### 3.3. The `ent` (Entitlement) Claim
+
+The `ent` claim carries an inline entitlement as a JSON **object**. Its fields describe what the agent is entitled to do in the resource domain — which operations against which resources, with what numeric ceilings or enumerated values.
+
+Example:
+
+```
+"ent": {
+  "actions": ["initiate"],
+  "instructedAmount": { "currency": "AUD", "amount": "500.00" },
+  "creditorAccount": { "identifier": "AU-BSB-123456-7890123" }
+}
+```
+
+The `ent` claim is OPTIONAL and is mutually exclusive with `aid`. An `ent` value MUST be a well-formed JSON object and MUST conform to one of the entitlement profiles declared by the agent operator (Section 4.3.3).
+
+The `ent` claim uses field syntax informed by [RFC9396] Section 2.2, and MAY use common fields per [RFC9396] Section 2.1 (`actions`, `locations`, `identifier`, `privileges`). It deliberately differs from [RFC9396]:
+
+- **Not an array.** `ent` is a single JSON object: one entitlement, inline.
+- **No `type` field.** `ent` is validated against the operator’s declared profiles, not a global type registry. A `type` field, if present, MUST be ignored.
+- **A resource-domain entitlement, not OAuth-protocol authority.** Restated below.
+
+The entitlement in `ent` (and equivalently, the constraint declared in the profile named by `aid`) describes the agent’s entitlement over **subject resources** — operations the agent may perform in the resource owner’s domain. It does NOT describe OAuth-protocol authority over the grant being negotiated. OAuth-protocol authority is expressed through `scope`, `resource`, and the [RFC9396] `authorization_details` request parameter, negotiated as part of grant issuance. The agent entitlement is upstream of that negotiation: a constraint on the agent’s range of action applied at delegation processing time, regardless of which scope or resource is requested. The AS enforces both, with neither broadening the other (Section 5.2).
+
+The `ent` claim MUST NOT be confused with the `authorization_details` request parameter of [RFC9396]. Where both are used, the request parameter expresses what the client requests the issued token to authorise against resources; `ent` (or the `aid` reference) expresses the standing entitlement constraint on the agent. The issued token’s authority is bounded by the intersection (Section 5.2).
+
+### 3.4. Other Claims
+
+The actor_token MAY carry other JWT claims consistent with [RFC8693] Section 4.1. Lifetime claims attached to the actor_token govern the actor_token, not the issued token’s `act` claim.
+
+-----
+
+## 4. Authorization Server Processing
+
+### 4.1. Actor Token Validation
+
+The AS MUST validate the actor_token per [RFC8693] Section 2.1 and local policy: signature verified against keys it trusts for the actor_token’s `iss` (the agent operator), and `iss`/`aud`/`exp`/`iat`/`jti` checked per [RFC8725] and [RFC8693]. If validation fails, the AS rejects per [RFC8693] Section 2.2.2.
+
+### 4.2. Obtaining the Agent Operator’s `entitlement_profiles` Metadata
+
+The agent operator (the actor_token’s `iss`) declares its profiles in the `entitlement_profiles` member of its OAuth client metadata (Section 6). To evaluate `aid` or `ent`, the AS MUST obtain this metadata. Three mechanisms are anticipated; an AS supports whichever its deployment uses.
+
+- **OpenID Federation 1.0 [OIDFED] entity metadata.** The AS resolves the operator’s Entity Configuration, validates a trust chain to a configured Trust Anchor per [OIDFED] Section 10, applies metadata policy, and reads `entitlement_profiles` from the `oauth_client` metadata. This is the primary anticipated mechanism for federated agentic ecosystems, where the trust chain also governs which operators may issue actor_tokens at all.
+- **Client ID Metadata Document [I-D.ietf-oauth-client-id-metadata-document].** Where the agent operator’s `client_id` is an HTTPS URL resolving to a JSON client metadata document, the AS reads `entitlement_profiles` from that document. This fits agent operators that publish their own metadata at a stable URL without pre-registration. (This is a work in progress at the time of writing; see Section 9.2.)
+- **Dynamic Client Registration [RFC7591].** Where the operator was registered via DCR (or via static configuration in the same representation), `entitlement_profiles` is part of the registered client metadata held by the AS.
+
+If the AS cannot obtain validated `entitlement_profiles` metadata for the operator AND the actor_token carries `aid` or `ent`, it MUST reject the Token Exchange (Section 5.4). If the actor_token carries neither, the metadata need not be obtained for the purposes of this profile.
+
+#### 4.2.1. Caching
+
+The AS MAY cache resolved metadata. Where obtained through OpenID Federation, caching MUST honour [OIDFED] Section 12 and the AS MUST be able to invalidate on Trust Mark revocation or trust-chain expiry. Where obtained through a Client ID Metadata Document, the AS follows the HTTP caching rules of that mechanism, with its own cap. Deployments in regulated sectors SHOULD set cache lifetimes consistent with the regulator’s expectations for the timeliness of entitlement revocation.
+
+### 4.3. Validating `aid` or `ent`
+
+#### 4.3.1. Mutual Exclusivity
+
+If both `aid` and `ent` are present, the AS MUST reject with `invalid_request` (Section 5.4). They are alternatives, not stackable.
+
+#### 4.3.2. Validating `aid`
+
+If `aid` is present, the AS MUST:
+
+1. Look up the profile named by `aid` in the operator’s `entitlement_profiles`. If no profile of that name is declared, reject with `invalid_authorization_details_type` (Section 5.4) — the operator is referencing a profile it has not published.
+1. If the named profile declares an entitlement constraint, take it as the validated agent entitlement for this Token Exchange. If the named profile is entitlement-free (Section 6.2), there is no agent-entitlement ceiling from this profile; the agent is recognised and the delegation proceeds under `scope`/`resource`/AS policy alone.
+
+There is nothing to validate against the actor_token body for `aid` beyond the name lookup; the profile declaration is authoritative.
+
+#### 4.3.3. Validating `ent`
+
+If `ent` is present, the AS MUST:
+
+1. **Well-formedness.** Confirm `ent` is a well-formed JSON object. Because the actor_token is a JWT, its payload has already been JSON-parsed during signature validation; the AS confirms `ent` is specifically a JSON object (not a string, array, or scalar). A malformed or wrong-typed `ent` is treated as a malformed authorization request element (Section 5.4).
+1. **Structural and bounds validation.** Validate that `ent` conforms to some entitlement-bearing profile declared by the operator: every required field present, no field outside the permitted set, every value within the profile’s bounds. Which profile applies may be deployment-defined (for example by field-set matching); this profile leaves the discriminator implementation-defined. What is normative: some entitlement-bearing declared profile MUST accept `ent`. If none does, treat it as an unacceptable entitlement (Section 5.4).
+1. Ignore any `type` field within `ent` (Section 3.3).
+
+The validated agent entitlement from an `ent`-bearing actor_token is the `ent` object as confirmed above.
+
+Note: an entitlement-free profile (Section 6.2) cannot be the target of `ent` validation — `ent` supplies entitlement values, so it must match a profile that defines an entitlement shape. An operator wishing to express “recognised, unconstrained” uses `aid` pointing at an entitlement-free profile, not `ent`.
+
+### 4.4. (Reserved)
+
+Operational attribution processing specified in earlier revisions has been removed (Section 1.3).
+
+-----
+
+## 5. Policy
+
+### 5.1. Inputs to the Policy Decision
+
+After processing per Section 4, the AS has available:
+
+- the Token Exchange request parameters (`scope`, `resource`, `audience`, request-level `authorization_details`, etc.);
+- the validated subject_token (the Principal — handled by [RFC8693], unmodified here);
+- the validated actor_token: the agent operator (`iss`) and agent (`sub`) identifiers, and the validated agent entitlement, if any (the constraint from the profile named by `aid`, the validated `ent` object, or nothing);
+- local policy.
+
+### 5.2. The Validated Agent Entitlement as a Ceiling
+
+When the AS has a validated agent entitlement, it is a **ceiling on the issued token’s authority over resources**, applied at delegation processing time. It is not itself a grant. The effective issued authority SHALL be the intersection of:
+
+- the validated agent entitlement (the profile’s declared constraint, or the validated `ent`);
+- the client’s requested authority (request parameters);
+- any further narrowing by AS policy.
+
+Authority is never broadened by any input; each can only narrow. If the actor_token carries neither `aid` nor `ent`, or carries an `aid` naming an entitlement-free profile, this profile imposes no agent-entitlement ceiling — issuance proceeds under [RFC8693] and AS local policy (Section 5.5).
+
+### 5.3. Reflection into the Issued Token’s `act` Claim
+
+Per [RFC8693] Section 4.1, the actor_token’s identity claims flow into the issued token’s `act` claim. This profile permits, but does not require, the AS to additionally reflect the agent entitlement into `act`:
+
+- The AS MAY include `aid` or `ent` in the issued token’s `act` claim, making the agent’s entitlement visible to the resource server, which can apply it at the resource boundary. This is the enforcement fallback for cases where the AS cannot itself fully enforce the entitlement.
+
+Whether to reflect, and which form, is a deployment decision; AS policy SHOULD consider enforcement coverage (Section 8.7), disclosure of concrete values (`ent`) versus profile name only (`aid`) (Section 8.4), and issued-token size. Reflection follows the [RFC8693] Section 4.1 rules: reflected `aid`/`ent` are identity-scoped descriptive members within `act`, alongside the standard `sub` and `iss`, and are not independent grants (Section 1.2).
+
+### 5.4. Error Conditions
+
+Where the actor_token carries `aid` or `ent`, this profile aligns its error behaviour with OAuth 2.0 Rich Authorization Requests [RFC9396] Section 5, treating an unacceptable or malformed agent entitlement the way the token endpoint treats an unacceptable or malformed `authorization_details`:
+
+- The AS MUST respond with the error code `invalid_authorization_details` (per [RFC9396] Section 5) when an `ent` value is not well-formed (Section 4.3.3 step 1), or when no entitlement-bearing declared profile accepts it (Section 4.3.3 step 2).
+- The AS MUST respond with the error code `invalid_authorization_details_type` (per [RFC9396] Section 5) when the agent entitlement corresponds to no profile the operator has declared — that is, an `aid` naming an undeclared profile (Section 4.3.2 step 1), this being the closest analogue to an unknown authorization-detail type.
+
+The AS MUST respond with `invalid_request` (per [RFC8693] Section 2.2.2) when both `aid` and `ent` are present (Section 4.3.1), and when validated `entitlement_profiles` metadata cannot be obtained while the actor_token carries `aid` or `ent` (Section 4.2).
+
+This profile defines no new error codes; it reuses [RFC9396] Section 5 and [RFC8693] Section 2.2.2 behaviour. (An earlier revision defined an `invalid_entitlement` code; it has been removed in favour of the [RFC9396] alignment.)
+
+### 5.5. Absence of an Agent Entitlement
+
+An actor_token carrying neither `aid` nor `ent`, or carrying an `aid` that names an entitlement-free profile, receives no agent-entitlement ceiling from this profile. Declaring `entitlement_profiles` enables an operator’s agents to opt in to a per-request entitlement constraint; it does not impose one. Deployments requiring every actor_token from an operator to carry an entitlement MUST enforce this via local AS policy.
+
+-----
+
+## 6. The `entitlement_profiles` Metadata Member
+
+This specification defines a metadata member, `entitlement_profiles`, published in the metadata of an agent operator’s OAuth client. It declares the named profiles agents of that operator may reference via `aid`, and against which inline `ent` claims are validated.
+
+### 6.1. Location
+
+The member appears within the agent operator’s OAuth client metadata, wherever that metadata is published (Section 4.2): as a member of the `oauth_client` metadata in an OpenID Federation Entity Configuration; in a Client ID Metadata Document; or in [RFC7591] registered client metadata. The member is OPTIONAL. An operator with no `entitlement_profiles` declares no profiles; actor_tokens from it cannot meaningfully carry `aid` or `ent`.
+
+### 6.2. Structure
+
+The `entitlement_profiles` member is a JSON object. Each member key is a profile name (the string space referenced by `aid`). Each member value is a JSON object, the **profile declaration**.
+
+A profile declaration is one of:
+
+- **Entitlement-bearing.** It describes which fields an entitlement may contain, which are required, and the bounds the AS enforces (Section 4.3) — for example a numeric ceiling, an enumerated set of `actions`, permitted `locations`. Such a profile can be referenced by `aid` and can be the target against which an `ent` is validated.
+- **Entitlement-free.** It declares the profile name with no entitlement constraint — recognising and naming an agent without bounding it (Section 3.2). An entitlement-free profile is referenced by `aid` only; it is never the target of `ent` validation (Section 4.3.3 note). It is represented as an empty object, or an object carrying only descriptive (non-constraint) members; the precise representation is deployment-defined, but the absence of constraint members (no `required`/`permitted`/`bounds` or their deployment equivalents) signals entitlement-free.
+
+The precise schema language for profile declarations is deployment-defined in this revision; a future revision is expected to fix a normative vocabulary. Whatever the language, the AS MUST be able to mechanically decide, for any candidate `ent`, whether it conforms to and is bounded by an entitlement-bearing profile, and MUST be able to distinguish entitlement-bearing from entitlement-free profiles.
+
+### 6.3. Example
+
+```
+"oauth_client": {
+  ...
+  "entitlement_profiles": {
+    "payment_initiation": {
+      "required": ["actions", "instructedAmount", "creditorAccount"],
+      "permitted": ["actions", "instructedAmount", "creditorAccount",
+                    "locations"],
+      "bounds": {
+        "actions": { "enum": ["initiate"] },
+        "instructedAmount.currency": { "enum": ["AUD"] },
+        "instructedAmount.amount": { "max": "1000.00" }
+      }
+    },
+    "account_information": {
+      "required": ["actions"],
+      "permitted": ["actions", "locations"],
+      "bounds": {
+        "actions": { "subset_of": ["retrieve", "list"] }
+      }
+    },
+    "concierge_recognised": {}
+  }
+}
+```
+
+`payment_initiation` and `account_information` are entitlement-bearing. `concierge_recognised` is entitlement-free: an actor_token with `aid: "concierge_recognised"` identifies the agent and authorises the delegation with no resource-domain entitlement ceiling from this profile.
+
+-----
+
+## 7. IANA Considerations
+
+### 7.1. JSON Web Token Claims Registration
+
+This specification requests two registrations in the “JSON Web Token Claims” subregistry [RFC7519]. The author has verified that neither conflicts with an existing registration; note that `entitlements` (plural, [RFC7643]/[RFC9068]) is unrelated to `ent`.
+
+- **Claim Name**: `aid`
+  **Claim Description**: Name of a profile in the agent operator’s client metadata, referenced by an OAuth 2.0 Token Exchange actor_token.
+  **Change Controller**: IETF
+  **Specification Document(s)**: Section 3.2 of this document
+- **Claim Name**: `ent`
+  **Claim Description**: Inline agent entitlement; a JSON object validated against the agent operator’s declared profiles, carried in an OAuth 2.0 Token Exchange actor_token.
+  **Change Controller**: IETF
+  **Specification Document(s)**: Section 3.3 of this document
+
+### 7.2. Client Metadata Member Registration
+
+Where an OpenID Federation [OIDFED] entity metadata registry exists, the following is requested there; otherwise the equivalent registry for the metadata source in use applies.
+
+- **Metadata Member**: `entitlement_profiles`
+  **Applies To**: `oauth_client` metadata
+  **Description**: Declares the named profiles agents of this OAuth client may reference via the `aid` claim of an OAuth 2.0 Token Exchange actor_token, or against which inline `ent` claims are validated.
+  **Change Controller**: IETF
+  **Specification Document(s)**: Section 6 of this document
+
+### 7.3. Error Codes
+
+This specification registers no new error codes. It reuses `invalid_authorization_details` and `invalid_authorization_details_type` from [RFC9396] Section 5, and `invalid_request` from [RFC8693] / [RFC6749].
+
+-----
+
+## 8. Security Considerations
+
+### 8.1. Trust in the Agent Operator
+
+The profile rests on the AS trusting the agent operator that issues the actor_token. The trust mechanism is unchanged from [RFC8693] and the AS’s federation/registration apparatus, but the consequence is broader: the operator’s attestations now include the agent’s entitlement. A compromised operator can mint actor_tokens asserting any entitlement up to its declared profiles. Mitigations are unchanged — short-lived actor_tokens, key rotation, federation revocation — but the bound on impact is exactly the operator’s published `entitlement_profiles`, which is why their integrity matters (Section 8.8).
+
+### 8.2. The Agent is Not a Separate Trust Anchor Path
+
+Because the agent is a constrained instantiation of the operator’s OAuth client and not a distinct federation entity, there is no separate trust chain to forge. The agent’s authority is bounded entirely by the operator’s published profiles. This reduces attack surface; the corollary is that the integrity of the operator’s metadata and trust chain is load-bearing for every agent.
+
+### 8.3. Profile Name Confusion Across Operators
+
+Profile names are operator-scoped (Section 3.2). The AS MUST resolve a name only against the `entitlement_profiles` of the operator identified by the actor_token’s `iss`, never against a global table or another operator’s metadata, to avoid a confused-deputy attack.
+
+### 8.4. Disclosure of Entitlement Detail
+
+The `ent` claim may carry privacy-sensitive information — counterparty identifiers, amounts, account references. Where the actor_token may transit intermediaries that should not see it, it SHOULD be encrypted to the AS using JSON Web Encryption [RFC7516] per [RFC8693] Section 6. When the AS reflects `ent` into the issued token’s `act` claim (Section 5.3), that content becomes visible to every party handling the issued token. Reflecting `aid` exposes only the profile name. Deployments concerned with disclosure SHOULD prefer `aid` over `ent` where the standing profile suffices, SHOULD reflect only the form needed at the resource server, and MAY redact reflected `ent` in audit pipelines.
+
+### 8.5. Minimised Actor-Chain Disclosure
+
+This profile deliberately carries only agent identity and entitlement in the actor_token. Operational attribution — deployment identifiers and the human operator of record — was removed (Section 1.3) precisely because it would propagate workload-domain and personal information along the token-exchange chain and, if reflected, into the issued token’s `act`. Implementers extending the actor_token with further claims SHOULD apply the same test: does this information need to leave the agent operator’s domain via the token chain, or can it be confined to a single hop (for example, the client assertion to the AS)? Information that does not need to propagate SHOULD NOT be placed in the actor_token.
+
+### 8.6. Replay
+
+Replay defences ([RFC8693] / [RFC7519] / [RFC8725]) apply unchanged. Because the actor_token carries entitlement that may survive into the issued token’s `act`, replay of a captured actor_token is more consequential than replay of a bare identity actor_token. Mitigations: short `exp`, enforced `jti` uniqueness within the `exp` window, TLS in transit, encryption to the AS where intermediaries are untrusted.
+
+### 8.7. Reflection Policy Pitfalls
+
+Section 5.3 leaves reflection a deployment decision. Two pitfalls:
+
+First, reflection-as-enforcement should be a fallback, not a substitute. If the AS reflects `ent` and also fully enforces it at issuance, the resource server’s check is duplicative (acceptable); but the AS should not decline to enforce something it could enforce, relying on the resource server instead. Reflection without AS-side enforcement is appropriate only where the AS genuinely cannot enforce (e.g., bounds dependent on runtime values).
+
+Second, reflecting `aid` alone risks resource-server ambiguity: a resource server seeing `act.aid` but lacking the operator’s `entitlement_profiles` cannot determine what the profile permits. Deployments using `aid` reflection for resource-server enforcement MUST ensure resource servers can resolve names to bounds — by metadata propagation, by reflecting the expanded profile as `act.ent`, or out-of-band.
+
+### 8.8. Integrity of `entitlement_profiles`
+
+The model rests on the AS obtaining the operator’s `entitlement_profiles` from a source it trusts and validates (Section 4.2). For OpenID Federation, [OIDFED] security considerations apply. For a Client ID Metadata Document, the integrity of the HTTPS origin serving the document and the binding of `client_id` to that URL are load-bearing. For registered or static metadata, the AS MUST protect it against unauthorised modification with the rigour it applies to the operator’s registered keys: a write to `entitlement_profiles` changes the ceiling on every agent of that operator.
+
+-----
+
+## 9. References
+
+### 9.1. Normative References
+
+- **[RFC2119]** Bradner, S., “Key words for use in RFCs to Indicate Requirement Levels”, BCP 14, RFC 2119, March 1997.
+- **[RFC6749]** Hardt, D., Ed., “The OAuth 2.0 Authorization Framework”, RFC 6749, October 2012.
+- **[RFC7519]** Jones, M., Bradley, J., and N. Sakimura, “JSON Web Token (JWT)”, RFC 7519, May 2015.
+- **[RFC8174]** Leiba, B., “Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words”, BCP 14, RFC 8174, May 2017.
+- **[RFC8693]** Jones, M., Nadalin, A., Campbell, B., Bradley, J., and C. Mortimore, “OAuth 2.0 Token Exchange”, RFC 8693, January 2020.
+- **[RFC8725]** Sheffer, Y., Hardt, D., and M. Jones, “JSON Web Token Best Current Practices”, BCP 225, RFC 8725, February 2020.
+- **[RFC9396]** Lodderstedt, T., Richer, J., and B. Campbell, “OAuth 2.0 Rich Authorization Requests”, RFC 9396, May 2023.
+
+### 9.2. Informative References
+
+- **[RFC7516]** Jones, M. and J. Hildebrand, “JSON Web Encryption (JWE)”, RFC 7516, May 2015.
+- **[RFC7523]** Jones, M., Campbell, B., and C. Mortimore, “JSON Web Token (JWT) Profile for OAuth 2.0 Client Authentication and Authorization Grants”, RFC 7523, May 2015.
+- **[RFC7591]** Richer, J., Ed., Jones, M., Bradley, J., Machulak, M., and P. Hunt, “OAuth 2.0 Dynamic Client Registration Protocol”, RFC 7591, July 2015.
+- **[RFC7643]** Hunt, P., Ed., Grizzle, K., Wahlstroem, E., and C. Mortimore, “System for Cross-domain Identity Management: Core Schema”, RFC 7643, September 2015.
+- **[RFC8705]** Campbell, B., Bradley, J., Sakimura, N., and T. Lodderstedt, “OAuth 2.0 Mutual-TLS Client Authentication and Certificate-Bound Access Tokens”, RFC 8705, February 2020.
+- **[RFC9068]** Bertocci, V., “JSON Web Token (JWT) Profile for OAuth 2.0 Access Tokens”, RFC 9068, October 2021.
+- **[OIDFED]** Hedberg, R., Jones, M., Solberg, A., Bradley, J., De Marco, G., and V. Dzhuvinov, “OpenID Federation 1.0”, OpenID Foundation, 2024.
+- **[I-D.ietf-oauth-client-id-metadata-document]** Parecki, A. and E. Smith, “OAuth Client ID Metadata Document”, Work in Progress, Internet-Draft, draft-ietf-oauth-client-id-metadata-document-01, 2026.
+- **[SPIFFE]** SPIFFE, “The SPIFFE Standard”, <https://github.com/spiffe/spiffe>.
+
+-----
+
+## Appendix A. Worked Examples
+
+Both examples use the same agent operator (`agents.example.com`) with the `entitlement_profiles` of Section 6.3.
+
+### A.1. Actor Token Using `aid` (Entitlement-Bearing Profile)
+
+```json
+{
+  "iss": "https://agents.example.com",
+  "sub": "atlas-concierge-instance-7",
+  "aud": "https://as.bank.example.com",
+  "iat": 1747180800,
+  "exp": 1747180860,
+  "jti": "5a1f4d8e-...-9c7b",
+  "aid": "payment_initiation"
+}
+```
+
+AS processing: actor_token validated; only `aid` present; `payment_initiation` is declared and entitlement-bearing; validated entitlement is that profile’s declared constraint; token issued bounded by the profile intersected with request and policy.
+
+### A.2. Actor Token Using `aid` (Entitlement-Free Profile)
+
+```json
+{
+  "iss": "https://agents.example.com",
+  "sub": "atlas-concierge-instance-7",
+  "aud": "https://as.bank.example.com",
+  "iat": 1747180800,
+  "exp": 1747180860,
+  "jti": "5a1f4d8e-...-9c7d",
+  "aid": "concierge_recognised"
+}
+```
+
+AS processing: `concierge_recognised` is declared and entitlement-free; the agent is recognised and the delegation proceeds with no agent-entitlement ceiling from this profile; `scope`/`resource`/AS policy still apply (Section 5.5).
+
+### A.3. Actor Token Using `ent` (Inline)
+
+```json
+{
+  "iss": "https://agents.example.com",
+  "sub": "atlas-concierge-instance-7",
+  "aud": "https://as.bank.example.com",
+  "iat": 1747180800,
+  "exp": 1747180860,
+  "jti": "5a1f4d8e-...-9c7c",
+  "ent": {
+    "actions": ["initiate"],
+    "instructedAmount": { "currency": "AUD", "amount": "500.00" },
+    "creditorAccount": { "identifier": "AU-BSB-123456-7890123" }
+  }
+}
+```
+
+AS processing: `ent` confirmed a well-formed JSON object; validated against declared profiles — conforms to `payment_initiation` (`actions` within enum, amount within ceiling, `creditorAccount` present, no field outside permitted); validated entitlement is the `ent` object. Had `instructedAmount.amount` been `"1500.00"`, the AS would respond `invalid_authorization_details` (no declared profile accepts it). Had `ent` been a JSON array rather than an object, the AS would respond `invalid_authorization_details` (malformed).
+
+### A.4. Issued Access Token with Reflected `act`
+
+```json
+{
+  "iss": "https://as.bank.example.com",
+  "sub": "bank-customer-bdc",
+  "aud": "https://api.bank.example.com",
+  "iat": 1747180860,
+  "exp": 1747184460,
+  "scope": "payment:initiate",
+  "act": {
+    "iss": "https://agents.example.com",
+    "sub": "atlas-concierge-instance-7",
+    "aid": "payment_initiation"
+  }
+}
+```
+
+The resource server sees: principal `bank-customer-bdc`; current actor `atlas-concierge-instance-7` from `agents.example.com`; agent’s standing entitlement is `payment_initiation`. Per [RFC8693] Section 4.1, access-control considers principal and current actor; `aid` is identity-scoped descriptive information (Section 1.2). Reflecting `aid` rather than `ent` keeps concrete values out of the issued token (Section 8.4); a resource server enforcing on `aid` must be able to resolve the profile (Section 8.7).
+
+-----
+
+## Appendix B. Changes
+
+### Changes from -03
+
+- **Removed the `attribution` claim** (deployment + operator) entirely. Operational attribution is delegated to a companion profile of [RFC7523] client assertions so that workload-domain and operator-PII information does not propagate along the token-exchange chain (Section 1.3, Section 8.5).
+- **Profiles may be entitlement-free.** `aid` may name a profile that carries no entitlement constraint, expressing “recognised, unconstrained” (Section 3.2, Section 6.2). Reworked `aid` validation (Section 4.3.2) and `ent` validation (Section 4.3.3 note) accordingly.
+- **Aligned entitlement errors with [RFC9396] Section 5.** Dropped the invented `invalid_entitlement` code; `ent` malformed/unacceptable now returns `invalid_authorization_details`, and an `aid` naming an undeclared profile returns `invalid_authorization_details_type` (Section 5.4). Added an explicit JSON well-formedness check for `ent` (Section 4.3.3).
+- **Added introduction guidance on `act` content** citing [RFC8693] Section 4.1 as the governing source, plus [RFC8725] and [RFC9068] (Section 1.2).
+- **Named three concrete metadata-hosting mechanisms** for `entitlement_profiles`, led by OpenID Federation entity metadata, then Client ID Metadata Document, then Dynamic Client Registration (Section 4.2).
+- **Dropped the “separate layer” framing** for non-delegated grants; replaced with a plain scope statement (Section 1.1).
+
+### Earlier history
+
+- **-03**: moved the profile from `client_assertion` to the Token Exchange `actor_token`; scoped to delegation; removed `wid`; added the (now-removed) `attribution` claim and reflection-into-`act`.
+- **-02 / -01 / -00**: client_assertion-based revisions; introduced the `entitlement_profiles` model and the `aid`/`ent` claims; originally profiled RFC 7523 with workload and agent identity.
+
+## Author’s Address
+
+D. Hyland
+ID Partners Pty Ltd
+100 Harris Street
+Pyrmont NSW 2009
+Australia
+
+Email: [dave@idpartners.com.au](mailto:dave@idpartners.com.au)
